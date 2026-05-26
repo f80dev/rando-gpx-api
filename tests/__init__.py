@@ -1,0 +1,1 @@
+# Test suite marker — actual tests live in tests/test_server.py
