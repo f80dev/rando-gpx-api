@@ -30,7 +30,7 @@ def parse_gpx(xml_content: str) -> list[tuple[float, float, int]]:
     """
     root = ET.fromstring(xml_content)
     # Try multiple common GPX namespaces
-    for ns in ['{http://www.topografx.com/GPX/1/1}', '{http://www.topografx.com/2008/gpx}',
+    for ns in ['{http://www.topografix.com/GPX/1/1}', '{http://www.topografx.com/2008/gpx}',
                '{http://topografix.com/GPX/1/1}', '']:
         pts = root.findall(f'.//{ns}trkpt') or root.findall(f'.//{ns}wpt')
         if pts:
