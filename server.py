@@ -35,7 +35,6 @@ MAX_KM = 20.0
 _KDTREE = None   # [(rowid, code_insee, nom, cp, lat, lon, x, y, z), ...]
 _KDTREE_IDX = {}  # rowid → index dans _KDTREE
 
-
 def _init_kdtree():
     global _KDTREE, _KDTREE_IDX
     if _KDTREE is not None:
@@ -60,11 +59,41 @@ def _init_kdtree():
             cos_lat * math.sin(lon_r),   # y
             math.sin(lat_r)              # z
         ))
-        # _KDTREE_IDX keyed by code_insee (string) — R-tree id is the equivalent integer
-        _KDTREE_IDX[code_insee] = len(kdtree) - 1
+        # On indexe le dictionnaire par l'entier rowid !
+        _KDTREE_IDX[rowid] = len(kdtree) - 1
 
     _KDTREE = kdtree
-    print(f"[init] KD-tree: {len(kdtree)} communes", flush=True)
+    print(f"[init] KD-tree: {len(kdtree)} communes branchées sur rowid", flush=True)
+
+
+def _ensure_rtree():
+    """Recrée proprement l'R-tree en se basant sur le rowid."""
+    conn = sqlite3.connect(DB_PATH)
+
+    for tbl in ['communes_rtree', 'communes_rtree_node', 'communes_rtree_parent', 'communes_rtree_rowid']:
+        conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+    conn.commit()
+
+    conn.execute("""
+        CREATE VIRTUAL TABLE communes_rtree USING rtree(
+            id, lat_min, lat_max, lon_min, lon_max
+        )
+    """)
+
+    # Insertion en utilisant directement le rowid de la table communes
+    conn.execute("""
+        INSERT OR IGNORE INTO communes_rtree(id, lat_min, lat_max, lon_min, lon_max)
+        SELECT rowid,
+               latitude_centre - 0.005, latitude_centre + 0.005,
+               longitude_centre - 0.005, longitude_centre + 0.005
+        FROM communes
+        WHERE latitude_centre IS NOT NULL AND longitude_centre IS NOT NULL
+    """)
+    conn.commit()
+    cnt = conn.execute("SELECT COUNT(*) FROM communes_rtree").fetchone()[0]
+    conn.close()
+    print(f"[init] R-tree synchronisé : {cnt} lignes insérées via rowid", flush=True)
+
 
 
 def get_kdtree():
@@ -84,58 +113,58 @@ def _get_rtree_conn():
     _init_kdtree()
     return _RTREE_CONN
 
-
-def _ensure_rtree():
-    """Rebuild R-tree: DELETE + re-INSERT (preserves table structure)."""
-    conn = sqlite3.connect(DB_PATH)
-
-    # If table exists but has wrong id type (rowid=int vs code_insee=str),
-    # we must DROP and recreate. Dropping rtree ALSO drops its 3 aux tables.
-    try:
-        sample = conn.execute("SELECT id FROM communes_rtree LIMIT 1").fetchone()
-        if sample is not None and isinstance(sample[0], str):
-            # Already has code_insee string ids — just repopulate
-            conn.execute("DELETE FROM communes_rtree")
-            conn.commit()
-        else:
-            # Wrong type or empty — must recreate table structure
-            for tbl in ['communes_rtree', 'communes_rtree_node',
-                       'communes_rtree_parent', 'communes_rtree_rowid']:
-                conn.execute(f"DROP TABLE IF EXISTS {tbl}")
-            conn.commit()
-            conn.execute("""
-                CREATE VIRTUAL TABLE communes_rtree USING rtree(
-                    id, lat_min, lat_max, lon_min, lon_max
-                )
-            """)
-    except Exception:
-        # Table doesn't exist at all — create it
-        for tbl in ['communes_rtree', 'communes_rtree_node',
-                   'communes_rtree_parent', 'communes_rtree_rowid']:
-            conn.execute(f"DROP TABLE IF EXISTS {tbl}")
-        conn.commit()
-        conn.execute("""
-            CREATE VIRTUAL TABLE communes_rtree USING rtree(
-                id, lat_min, lat_max, lon_min, lon_max
-            )
-        """)
-
-    # CAST to TEXT ensures code_insee strings are stored as-is in R-tree id even when
-    # SQLite internally handles them as integer (in Metro, all codes are 5-digit).
-    # Non-numeric overseas codes (e.g. '2A001') are stored as their integer prefix —
-    # but since there are no duplicate code_insee values, no collision occurs.
-    conn.execute("""
-        INSERT OR IGNORE INTO communes_rtree(id, lat_min, lat_max, lon_min, lon_max)
-        SELECT CAST(code_insee AS TEXT),
-               latitude_centre - 0.005, latitude_centre + 0.005,
-               longitude_centre - 0.005, longitude_centre + 0.005
-        FROM communes
-        WHERE latitude_centre IS NOT NULL AND longitude_centre IS NOT NULL
-    """)
-    conn.commit()
-    cnt = conn.execute("SELECT COUNT(*) FROM communes_rtree").fetchone()[0]
-    conn.close()
-    print(f"[init] R-tree rebuilt: {cnt} rows (code_insee as string id)", flush=True)
+#
+# def _ensure_rtree():
+#     """Rebuild R-tree: DELETE + re-INSERT (preserves table structure)."""
+#     conn = sqlite3.connect(DB_PATH)
+#
+#     # If table exists but has wrong id type (rowid=int vs code_insee=str),
+#     # we must DROP and recreate. Dropping rtree ALSO drops its 3 aux tables.
+#     try:
+#         sample = conn.execute("SELECT id FROM communes_rtree LIMIT 1").fetchone()
+#         if sample is not None and isinstance(sample[0], str):
+#             # Already has code_insee string ids — just repopulate
+#             conn.execute("DELETE FROM communes_rtree")
+#             conn.commit()
+#         else:
+#             # Wrong type or empty — must recreate table structure
+#             for tbl in ['communes_rtree', 'communes_rtree_node',
+#                        'communes_rtree_parent', 'communes_rtree_rowid']:
+#                 conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+#             conn.commit()
+#             conn.execute("""
+#                 CREATE VIRTUAL TABLE communes_rtree USING rtree(
+#                     id, lat_min, lat_max, lon_min, lon_max
+#                 )
+#             """)
+#     except Exception:
+#         # Table doesn't exist at all — create it
+#         for tbl in ['communes_rtree', 'communes_rtree_node',
+#                    'communes_rtree_parent', 'communes_rtree_rowid']:
+#             conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+#         conn.commit()
+#         conn.execute("""
+#             CREATE VIRTUAL TABLE communes_rtree USING rtree(
+#                 id, lat_min, lat_max, lon_min, lon_max
+#             )
+#         """)
+#
+#     # CAST to TEXT ensures code_insee strings are stored as-is in R-tree id even when
+#     # SQLite internally handles them as integer (in Metro, all codes are 5-digit).
+#     # Non-numeric overseas codes (e.g. '2A001') are stored as their integer prefix —
+#     # but since there are no duplicate code_insee values, no collision occurs.
+#     conn.execute("""
+#         INSERT OR IGNORE INTO communes_rtree(id, lat_min, lat_max, lon_min, lon_max)
+#         SELECT CAST(code_insee AS TEXT),
+#                latitude_centre - 0.005, latitude_centre + 0.005,
+#                longitude_centre - 0.005, longitude_centre + 0.005
+#         FROM communes
+#         WHERE latitude_centre IS NOT NULL AND longitude_centre IS NOT NULL
+#     """)
+#     conn.commit()
+#     cnt = conn.execute("SELECT COUNT(*) FROM communes_rtree").fetchone()[0]
+#     conn.close()
+#     print(f"[init] R-tree rebuilt: {cnt} rows (code_insee as string id)", flush=True)
 
 
 # ─── Core: nearest commune via R-tree bbox + cartésien ──────────────────────
@@ -182,59 +211,35 @@ def _bbox_candidates(lat: float, lon: float, max_km: float = MAX_KM) -> list:
 
 
 # ─── Batch: find_communes_along_trace ───────────────────────────────────────
-
 def find_communes_along_trace(sampled_points: list[tuple[float, float, int]], max_km: float = MAX_KM) -> list[dict]:
-    """
-    Retourne les communes uniques traversées.
-    Stratégie: batch R-tree queries par chunks de points → nearest cartésien.
-    """
     t0 = time.time()
     tree = get_kdtree()
     conn = _get_rtree_conn()
 
-    # Phase 1: batch R-tree queries par chunk de 300 points
     all_candidate_ids = set()
-    CHUNK = 300
 
-    for chunk_start in range(0, len(sampled_points), CHUNK):
-        chunk = sampled_points[chunk_start:chunk_start + CHUNK]
-        conditions = []
-        params = []
-        for lat, lon, _ in chunk:
-            dlat = (max_km * KM_TO_DEG_LAT) + RADIUS_DEG_EXTRA
-            try:
-                dlon = dlat / math.cos(math.radians(lat))
-            except Exception:
-                dlon = dlat
-            conditions.append("(r.lat_min <= ? AND r.lat_max >= ? AND r.lon_min <= ? AND r.lon_max >= ?)")
-            params.extend([lat + dlat, lat - dlat, lon + dlon, lon - dlon])
-
-        sql = f"""SELECT DISTINCT r.id FROM communes_rtree r WHERE {" OR ".join(conditions)}"""
+    # Phase 1 : Collecte des candidats par point (requêtes unitaires ultra-rapides indexées)
+    for lat, lon, _ in sampled_points:
+        dlat = (max_km * KM_TO_DEG_LAT) + RADIUS_DEG_EXTRA
         try:
-            all_candidate_ids.update(row[0] for row in conn.execute(sql, params).fetchall())
+            dlon = dlat / math.cos(math.radians(lat))
         except Exception:
-            # Sous-divise en 100 si trop de termes
-            for sub_start in range(0, len(chunk), 100):
-                sub = chunk[sub_start:sub_start + 100]
-                sub_cond = []
-                sub_params = []
-                for lat, lon, _ in sub:
-                    dlat2 = (max_km * KM_TO_DEG_LAT) + RADIUS_DEG_EXTRA
-                    try:
-                        dlon2 = dlat2 / math.cos(math.radians(lat))
-                    except Exception:
-                        dlon2 = dlat2
-                    sub_cond.append("(r.lat_min <= ? AND r.lat_max >= ? AND r.lon_min <= ? AND r.lon_max >= ?)")
-                    sub_params.extend([lat + dlat2, lat - dlat2, lon + dlon2, lon - dlon2])
-                sql2 = f"""SELECT DISTINCT r.id FROM communes_rtree r WHERE {" OR ".join(sub_cond)}"""
-                all_candidate_ids.update(row[0] for row in conn.execute(sql2, sub_params).fetchall())
+            dlon = dlat
+
+        cur = conn.execute("""
+            SELECT id FROM communes_rtree
+            WHERE lat_min <= ? AND lat_max >= ?
+              AND lon_min <= ? AND lon_max >= ?
+        """, (lat + dlat, lat - dlat, lon + dlon, lon - dlon))
+
+        all_candidate_ids.update(row[0] for row in cur.fetchall())
 
     t1 = time.time()
 
-    # Pré-build code_insee string → kdtree index
-    code_insee_to_idx = {str(_id): _KDTREE_IDX[str(_id)] for _id in all_candidate_ids if str(_id) in _KDTREE_IDX}
+    # Phase 2 : Mapping rowid direct vers index KD-tree
+    rowid_to_idx = {_id: _KDTREE_IDX[_id] for _id in all_candidate_ids if _id in _KDTREE_IDX}
 
-    # Phase 2: nearest cartésien par point sur tous les candidats
+    # Phase 3 : Distance cartésienne exacte
     seen_insee = {}
     t2 = time.time()
     for lat, lon, _ in sampled_points:
@@ -246,9 +251,9 @@ def find_communes_along_trace(sampled_points: list[tuple[float, float, int]], ma
 
         best_d = max_km
         best = None
-        for code_insee_str, idx in code_insee_to_idx.items():
-            _, _, nom, cp, lat_c, lon_c, cx, cy, cz = tree[idx]
-            d = math.sqrt((qx - cx)**2 + (qy - cy)**2 + (qz - cz)**2) * EARTH_RADIUS_KM
+        for r_id, idx in rowid_to_idx.items():
+            _, code_insee_str, nom, cp, lat_c, lon_c, cx, cy, cz = tree[idx]
+            d = math.sqrt((qx - cx) ** 2 + (qy - cy) ** 2 + (qz - cz) ** 2) * EARTH_RADIUS_KM
             if d < best_d:
                 best_d = d
                 best = {"code_insee": code_insee_str, "nom": nom, "code_postal": cp, "lat_c": lat_c, "lon_c": lon_c}
@@ -256,19 +261,19 @@ def find_communes_along_trace(sampled_points: list[tuple[float, float, int]], ma
             seen_insee[best["code_insee"]] = best
 
     t3 = time.time()
-    print(f"[find_communes] rtree={t1-t0:.3f}s candidates={len(all_candidate_ids)}/{len(code_insee_to_idx)} nearest={t3-t2:.3f}s total={t3-t0:.3f}s", flush=True)
+    print(
+        f"[find_communes] rtree_lookup={t1 - t0:.3f}s candidates={len(all_candidate_ids)} nearest_calc={t3 - t2:.3f}s total={t3 - t0:.3f}s",
+        flush=True)
     return list(seen_insee.values())
-
 
 # ─── GPX Parser ─────────────────────────────────────────────────────────────
 
 def parse_gpx(xml_content: str) -> list[tuple[float, float, int]]:
     root = ET.fromstring(xml_content)
-    for ns in ['{http://www.topografix.com/GPX/1/1}', '{http://www.topografx.com/2008/gpx}', '{http://topografix.com/GPX/1/1}', '']:
-        pts = root.findall(f'.//{ns}trkpt') or root.findall(f'.//{ns}wpt')
-        if pts:
-            break
+    # Le pattern {*} matche n'importe quel namespace XML
+    pts = root.findall('.//{*}trkpt') or root.findall('.//{*}wpt')
     return [(float(p.get('lat')), float(p.get('lon')), i) for i, p in enumerate(pts)]
+
 
 
 def _sample_gpx_points(points: list[tuple[float, float, int]], sample_m: float = 100.0) -> list[tuple[float, float, int]]:
