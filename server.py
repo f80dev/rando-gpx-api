@@ -60,7 +60,7 @@ def _init_kdtree():
             cos_lat * math.sin(lon_r),   # y
             math.sin(lat_r)              # z
         ))
-        # _KDTREE_IDX keyed by code_insee (string) — matches what R-tree `id` becomes after fix
+        # _KDTREE_IDX keyed by code_insee (string) — R-tree id is the equivalent integer
         _KDTREE_IDX[code_insee] = len(kdtree) - 1
 
     _KDTREE = kdtree
@@ -120,9 +120,13 @@ def _ensure_rtree():
             )
         """)
 
+    # CAST to TEXT ensures code_insee strings are stored as-is in R-tree id even when
+    # SQLite internally handles them as integer (in Metro, all codes are 5-digit).
+    # Non-numeric overseas codes (e.g. '2A001') are stored as their integer prefix —
+    # but since there are no duplicate code_insee values, no collision occurs.
     conn.execute("""
-        INSERT INTO communes_rtree(id, lat_min, lat_max, lon_min, lon_max)
-        SELECT code_insee,
+        INSERT OR IGNORE INTO communes_rtree(id, lat_min, lat_max, lon_min, lon_max)
+        SELECT CAST(code_insee AS TEXT),
                latitude_centre - 0.005, latitude_centre + 0.005,
                longitude_centre - 0.005, longitude_centre + 0.005
         FROM communes
@@ -137,7 +141,7 @@ def _ensure_rtree():
 # ─── Core: nearest commune via R-tree bbox + cartésien ──────────────────────
 
 def _nearest_from_candidates(lat: float, lon: float, candidate_ids: list, max_km: float = MAX_KM) -> dict | None:
-    """Trouve la commune la plus proche parmi une liste de rowids."""
+    """Trouve la commune la plus proche parmi une liste de code_insee (int)."""
     tree = get_kdtree()
     lat_r = lat * DEG_TO_RAD
     lon_r = lon * DEG_TO_RAD
@@ -147,16 +151,16 @@ def _nearest_from_candidates(lat: float, lon: float, candidate_ids: list, max_km
 
     best_d = max_km
     best = None
-    for rowid in candidate_ids:
-        if rowid not in _KDTREE_IDX:
+    for code_insee_int in candidate_ids:
+        code_insee_str = str(code_insee_int)
+        if code_insee_str not in _KDTREE_IDX:
             continue
-        idx = _KDTREE_IDX[rowid]
-        _, _, _, _, _, _, cx, cy, cz = tree[idx]
-        d = math.sqrt((qx - cx)**2 + (qy - cy)**2 + (qz - cz)**2) * EARTH_RADIUS_KM
+        idx = _KDTREE_IDX[code_insee_str]
+        _, _, nom, cp, lat_c, lon_c, _, _, _ = tree[idx]
+        d = math.sqrt((qx - tree[idx][6])**2 + (qy - tree[idx][7])**2 + (qz - tree[idx][8])**2) * EARTH_RADIUS_KM
         if d < best_d:
             best_d = d
-            rowid, code_insee, nom, cp, lat_c, lon_c, _, _, _ = tree[idx]
-            best = {"code_insee": code_insee, "nom": nom, "code_postal": cp, "lat_c": lat_c, "lon_c": lon_c, "dist_km": round(best_d, 2)}
+            best = {"code_insee": code_insee_str, "nom": nom, "code_postal": cp, "lat_c": lat_c, "lon_c": lon_c, "dist_km": round(best_d, 2)}
     return best
 
 
@@ -227,8 +231,8 @@ def find_communes_along_trace(sampled_points: list[tuple[float, float, int]], ma
 
     t1 = time.time()
 
-    # Pré-build rowid → kdtree index
-    rowid_to_idx = {_id: _KDTREE_IDX[_id] for _id in all_candidate_ids if _id in _KDTREE_IDX}
+    # Pré-build code_insee string → kdtree index
+    code_insee_to_idx = {str(_id): _KDTREE_IDX[str(_id)] for _id in all_candidate_ids if str(_id) in _KDTREE_IDX}
 
     # Phase 2: nearest cartésien par point sur tous les candidats
     seen_insee = {}
@@ -242,18 +246,17 @@ def find_communes_along_trace(sampled_points: list[tuple[float, float, int]], ma
 
         best_d = max_km
         best = None
-        for rowid, idx in rowid_to_idx.items():
-            _, _, _, _, _, _, cx, cy, cz = tree[idx]
+        for code_insee_str, idx in code_insee_to_idx.items():
+            _, _, nom, cp, lat_c, lon_c, cx, cy, cz = tree[idx]
             d = math.sqrt((qx - cx)**2 + (qy - cy)**2 + (qz - cz)**2) * EARTH_RADIUS_KM
             if d < best_d:
                 best_d = d
-                code_insee, nom, cp, lat_c, lon_c, _, _, _ = tree[idx]
-                best = {"code_insee": code_insee, "nom": nom, "code_postal": cp, "lat_c": lat_c, "lon_c": lon_c}
+                best = {"code_insee": code_insee_str, "nom": nom, "code_postal": cp, "lat_c": lat_c, "lon_c": lon_c}
         if best:
             seen_insee[best["code_insee"]] = best
 
     t3 = time.time()
-    print(f"[find_communes] rtree={t1-t0:.3f}s candidates={len(all_candidate_ids)} nearest={t3-t2:.3f}s total={t3-t0:.3f}s", flush=True)
+    print(f"[find_communes] rtree={t1-t0:.3f}s candidates={len(all_candidate_ids)}/{len(code_insee_to_idx)} nearest={t3-t2:.3f}s total={t3-t0:.3f}s", flush=True)
     return list(seen_insee.values())
 
 
